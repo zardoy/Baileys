@@ -1,12 +1,10 @@
 import { Boom } from '@hapi/boom'
-import makeWASocket, { AnyMessageContent, delay, DisconnectReason, fetchLatestBaileysVersion, isJidBroadcast, makeCacheableSignalKeyStore, makeInMemoryStore, MessageRetryMap, useMultiFileAuthState } from '../src'
+import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion, isJidBroadcast, makeCacheableSignalKeyStore, makeInMemoryStore, MessageRetryMap, useMultiFileAuthState } from '../src'
 import MAIN_LOGGER from '../src/Utils/logger'
 
 const logger = MAIN_LOGGER.child({ })
-logger.level = 'trace'
-
-const useStore = !process.argv.includes('--no-store')
-const doReplies = !process.argv.includes('--no-reply')
+// logger.level = 'trace'
+logger.level = 'warn'
 
 // external map to store retry counts of messages when decryption/encryption fails
 // keep this out of the socket itself, so as to prevent a message decryption/encryption loop across socket restarts
@@ -14,12 +12,14 @@ const msgRetryCounterMap: MessageRetryMap = { }
 
 // the store maintains the data of the WA connection in memory
 // can be written out to a file & read from it
-const store = useStore ? makeInMemoryStore({ logger }) : undefined
+const store = makeInMemoryStore({ logger })
 store?.readFromFile('./baileys_store_multi.json')
 // save every 10s
 setInterval(() => {
 	store?.writeToFile('./baileys_store_multi.json')
 }, 10_000)
+
+function setNonNullable<T>(arg: T): asserts arg is NonNullable<T> {}
 
 // start a connection
 const startSock = async() => {
@@ -58,18 +58,6 @@ const startSock = async() => {
 
 	store?.bind(sock.ev)
 
-	const sendMessageWTyping = async(msg: AnyMessageContent, jid: string) => {
-		await sock.presenceSubscribe(jid)
-		await delay(500)
-
-		await sock.sendPresenceUpdate('composing', jid)
-		await delay(2000)
-
-		await sock.sendPresenceUpdate('paused', jid)
-
-		await sock.sendMessage(jid, msg)
-	}
-
 	// the process function lets you process all events that just occurred
 	// efficiently in a batch
 	sock.ev.process(
@@ -89,6 +77,14 @@ const startSock = async() => {
 					}
 				}
 
+				if(connection === 'open') {
+					void sock.resyncAppState(['regular'], true)
+					store.labelsReady().then(() => {
+						const labels = store.getLabels()!
+						console.log('Available labels:', labels.map((l) => l.name).join(', '))
+					})
+				}
+
 				console.log('connection update', update)
 			}
 
@@ -101,12 +97,6 @@ const startSock = async() => {
 				console.log('recv call event', events.call)
 			}
 
-			// history received
-			if(events['messaging-history.set']) {
-				const { chats, contacts, messages, isLatest } = events['messaging-history.set']
-				console.log(`recv ${chats.length} chats, ${contacts.length} contacts, ${messages.length} msgs (is latest: ${isLatest})`)
-			}
-
 			// received a new message
 			if(events['messages.upsert']) {
 				const upsert = events['messages.upsert']
@@ -114,10 +104,33 @@ const startSock = async() => {
 
 				if(upsert.type === 'notify') {
 					for(const msg of upsert.messages) {
-						if(!msg.key.fromMe && doReplies) {
-							console.log('replying to', msg.key.remoteJid)
+						if(msg.key.fromMe) {
 							await sock!.readMessages([msg.key])
-							await sendMessageWTyping({ text: 'Hello there!' }, msg.key.remoteJid!)
+							const message = msg.message?.conversation
+							if(!message || !message.startsWith('/')) {
+								continue
+							}
+
+							const [cmd, ...args] = message.slice(1).split(' ')
+							if(cmd === 'label' || cmd === 'unlabel') {
+								const labels = store.getLabels()
+								if(!labels) {
+									logger.error('Label command', 'Labels not received yet')
+									continue
+								}
+
+								const isAddingLabel = cmd === 'label'
+								const labelName = args.join(' ')
+								const labelId = labels.find((l) => l.name === labelName)?.id
+								setNonNullable(msg.key.remoteJid)
+								if(!labelId) {
+									await sock.sendMessage(msg.key.remoteJid, { text: `Label with name ${args} not found, available: ${labels.map((l) => l.name).join(', ')}` })
+									continue
+								}
+
+								const labelIds = [labelId.toString()]
+								await sock.setLabels(msg.key.remoteJid, isAddingLabel ? labelIds : [], isAddingLabel ? [] : labelIds)
+							}
 						}
 					}
 				}
@@ -125,23 +138,23 @@ const startSock = async() => {
 
 			// messages updated like status delivered, message deleted etc.
 			if(events['messages.update']) {
-				console.log(events['messages.update'])
+				console.log('messages.update', events['messages.update'])
 			}
 
 			if(events['message-receipt.update']) {
-				console.log(events['message-receipt.update'])
+				console.log('message-receipt.update', events['message-receipt.update'])
 			}
 
 			if(events['messages.reaction']) {
-				console.log(events['messages.reaction'])
+				console.log('messages.reaction', events['messages.reaction'])
 			}
 
 			if(events['presence.update']) {
-				console.log(events['presence.update'])
+				console.log('presence.update', events['presence.update'])
 			}
 
 			if(events['chats.update']) {
-				console.log(events['chats.update'])
+				console.log('chats.update', events['chats.update'])
 			}
 
 			if(events['contacts.update']) {

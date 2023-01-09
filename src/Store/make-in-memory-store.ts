@@ -1,10 +1,12 @@
 import type KeyedDB from '@adiwajshing/keyed-db'
 import type { Comparable } from '@adiwajshing/keyed-db/lib/Types'
+import { Boom } from '@hapi/boom'
 import type { Logger } from 'pino'
 import { proto } from '../../WAProto'
 import { DEFAULT_CONNECTION_CONFIG } from '../Defaults'
 import type makeMDSocket from '../Socket'
 import type { BaileysEventEmitter, Chat, ConnectionState, Contact, GroupMetadata, PresenceData, WAMessage, WAMessageCursor, WAMessageKey } from '../Types'
+import { LabelState } from '../Types/Label'
 import { toNumber, updateMessageWithReaction, updateMessageWithReceipt } from '../Utils'
 import { jidNormalizedUser } from '../WABinary'
 import makeOrderedDictionary from './make-ordered-dictionary'
@@ -25,6 +27,17 @@ export type BaileysInMemoryStoreConfig = {
 
 const makeMessagesDictionary = () => makeOrderedDictionary(waMessageID)
 
+interface FromJsonData {
+	chats: Chat[]
+	contacts: {
+		[id: string]: Contact
+	}
+	messages: {
+		[id: string]: WAMessage[]
+	}
+	labels: LabelState[]
+}
+
 export default (
 	{ logger: _logger, chatKey }: BaileysInMemoryStoreConfig
 ) => {
@@ -35,6 +48,7 @@ export default (
 	const chats = new KeyedDB(chatKey, c => c.id)
 	const messages: { [_: string]: ReturnType<typeof makeMessagesDictionary> } = { }
 	const contacts: { [_: string]: Contact } = { }
+	let labels: LabelState[] | null = null
 	const groupMetadata: { [_: string]: GroupMetadata } = { }
 	const presences: { [id: string]: { [participant: string]: PresenceData } } = { }
 	const state: ConnectionState = { connection: 'close' }
@@ -60,6 +74,7 @@ export default (
 		return oldContacts
 	}
 
+	let eventEmitter: BaileysEventEmitter | undefined
 	/**
 	 * binds to a BaileysEventEmitter.
 	 * It listens to all events and constructs a state that you can query accurate data from.
@@ -67,6 +82,7 @@ export default (
 	 * @param ev typically the event emitter from the socket connection
 	 */
 	const bind = (ev: BaileysEventEmitter) => {
+		eventEmitter = ev
 		ev.on('connection.update', update => {
 			Object.assign(state, update)
 		})
@@ -241,17 +257,38 @@ export default (
 				}
 			}
 		})
+
+		ev.on('labels.update', ({ id, name, deleted }) => {
+			if(deleted) {
+				if(!labels) {
+					return
+				}
+
+				const labelIdx = labels.findIndex((l) => l.id === id)
+				if(labelIdx !== -1) {
+					labels.splice(labelIdx, 1)
+				}
+			} else {
+				labels ??= []
+				labels.push({
+					id,
+					name,
+				})
+			}
+		})
 	}
 
 	const toJSON = () => ({
 		chats,
 		contacts,
-		messages
+		messages,
+		labels
 	})
 
-	const fromJSON = (json: { chats: Chat[], contacts: { [id: string]: Contact }, messages: { [id: string]: WAMessage[] } }) => {
+	const fromJSON = (json: FromJsonData) => {
 		chats.upsert(...json.chats)
 		contactsUpsert(Object.values(json.contacts))
+		labels = json.labels
 		for(const jid in json.messages) {
 			const list = assertMessageList(jid)
 			for(const msg of json.messages[jid]) {
@@ -269,6 +306,31 @@ export default (
 		state,
 		presences,
 		bind,
+		/**
+		 * @returns null if labels are not fetched yet
+		 */
+		getLabels() {
+			return labels
+		},
+		async labelsReady() {
+			if(!eventEmitter) {
+				throw new Boom('.bind(ev) must be called to use this method')
+			}
+
+			if(labels !== null) {
+				return
+			}
+
+			await new Promise<void>(resolve => {
+				const listener = () => {
+					eventEmitter!.off('labels.update', listener)
+					resolve()
+				}
+
+				eventEmitter!.on('labels.update', listener)
+			})
+
+		},
 		/** loads messages from the store, if not found -- uses the legacy connection */
 		loadMessages: async(jid: string, count: number, cursor: WAMessageCursor) => {
 			const list = assertMessageList(jid)

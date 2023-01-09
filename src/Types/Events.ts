@@ -5,6 +5,7 @@ import { WACallEvent } from './Call'
 import { Chat, ChatUpdate, PresenceData } from './Chat'
 import { Contact } from './Contact'
 import { GroupMetadata, ParticipantAction } from './GroupMetadata'
+import { LabelChatEvent } from './Label'
 import { MessageUpsertType, MessageUserReceiptUpdate, WAMessage, WAMessageKey, WAMessageUpdate } from './Message'
 import { ConnectionState } from './State'
 
@@ -52,6 +53,12 @@ export type BaileysEventMap = {
 
     'blocklist.set': { blocklist: string[] }
     'blocklist.update': { blocklist: string[], type: 'add' | 'remove' }
+    /** List of labels update (during app sync) */
+    'labels.update': { name: string, deleted: boolean, id: number }
+    /** Receive chat gets labeled (also on initial sync) */
+    'labels.chatLabeled': LabelChatEvent
+    /** Receive when chat gets unlabeled */
+    'labels.chatUnlabeled': LabelChatEvent
     /** Receive an update on a call, including when the call was received, rejected, accepted */
     'call': WACallEvent[]
 }

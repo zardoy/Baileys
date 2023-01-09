@@ -275,6 +275,13 @@ export const makeBusinessSocket = (config: SocketConfig) => {
 		getCollections,
 		productCreate,
 		productDelete,
-		productUpdate
+		productUpdate,
+		async setLabels(jid: string, addLabelIds: string[], removeLabelIds: string[] = []) {
+			for(const [label, ids] of [[true, addLabelIds], [false, removeLabelIds]] as const) {
+				for(const labelId of ids) {
+					await sock.chatModify({ label, labelId }, jid)
+				}
+			}
+		},
 	}
 }
